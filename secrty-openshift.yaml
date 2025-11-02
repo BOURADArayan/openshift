@@ -1,0 +1,36 @@
+apiVersion: security.openshift.io/v1
+kind: SecurityContextConstraints
+metadata:
+  name: ims-scc
+allowHostDirVolumePlugin: true
+allowHostIPC: false
+allowHostNetwork: false
+allowHostPID: false
+allowHostPorts: false
+allowPrivileged: false
+allowPrivilegedContainer: false
+allowedCapabilities:
+  - NET_ADMIN
+  - SYS_ADMIN
+  - IPC_LOCK
+fsGroup:
+  type: MustRunAs
+  ranges:
+    - min: 1
+      max: 65535
+runAsUser:
+  type: MustRunAsRange
+  uidRangeMin: 1
+  uidRangeMax: 65535
+seLinuxContext:
+  type: MustRunAs
+supplementalGroups:
+  type: MustRunAs
+  ranges:
+    - min: 1
+      max: 65535
+volumes:
+  - configMap
+  - emptyDir
+  - persistentVolumeClaim
+  - secret
