@@ -1,0 +1,1345 @@
+#01-namespace.yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ims
+  labels:
+    name: ims
+    app: ims-core
+---
+#02-pv-mongo.yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mongo-pvc
+  namespace: ims
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+---
+#03-pv-mysql.yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mysql-pvc
+  namespace: ims
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+---
+#04-deployment-mysql.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mysql
+  namespace: ims
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mysql
+      io.kompose.service: mysql
+  template:
+    metadata:
+      labels:
+        app: mysql
+        io.kompose.service: mysql
+    spec:
+      containers:
+      - name: mysql
+        image: mysql:8.0
+        env:
+        - name: MYSQL_ROOT_PASSWORD
+          value: "linux"
+        - name: MYSQL_DATABASE
+          value: "open5gs"
+        ports:
+        - containerPort: 3306
+        volumeMounts:
+        - name: mysql-storage
+          mountPath: /var/lib/mysql
+      volumes:
+      - name: mysql-storage
+        persistentVolumeClaim:
+          claimName: mysql-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql
+  namespace: ims
+spec:
+  selector:
+    app: mysql
+    io.kompose.service: mysql
+  ports:
+  - port: 3306
+    targetPort: 3306
+---
+#05-deployment-mongo.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mongo
+  namespace: ims
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mongo
+      io.kompose.service: mongo
+  template:
+    metadata:
+      labels:
+        app: mongo
+        io.kompose.service: mongo
+    spec:
+      containers:
+      - name: mongo
+        image: mongo:6.0
+        command: ["mongod", "--bind_ip", "0.0.0.0"]
+        ports:
+        - containerPort: 27017
+          name: mongodb
+          protocol: TCP
+        livenessProbe:
+          tcpSocket:
+            port: 27017
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        readinessProbe:
+          tcpSocket:
+            port: 27017
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        volumeMounts:
+        - name: mongo-storage
+          mountPath: /data/db
+      volumes:
+      - name: mongo-storage
+        persistentVolumeClaim:
+          claimName: mongo-pvc
+      restartPolicy: Always
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mongo
+  namespace: ims
+spec:
+  selector:
+    app: mongo
+    io.kompose.service: mongo
+  ports:
+  - port: 27017
+    targetPort: 27017
+---
+#10-services-ims.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: hss
+  namespace: ims
+spec:
+  selector:
+    io.kompose.service: hss
+  ports:
+  - name: diameter
+    port: 3868
+    targetPort: 3868
+  - name: web
+    port: 8080
+    targetPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pcrf
+  namespace: ims
+spec:
+  selector:
+    io.kompose.service: pcrf
+  ports:
+  - name: diameter
+    port: 3868
+    targetPort: 3868
+  - name: metrics
+    port: 9091
+    targetPort: 9091
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pcscf
+  namespace: ims
+spec:
+  selector:
+    io.kompose.service: pcscf
+  ports:
+  - name: sip-udp
+    protocol: UDP
+    port: 5060
+    targetPort: 5060
+  - name: sip-tcp
+    protocol: TCP
+    port: 5060
+    targetPort: 5060
+  type: NodePort
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: icscf
+  namespace: ims
+spec:
+  selector:
+    io.kompose.service: icscf
+  ports:
+  - name: sip
+    port: 4060
+    targetPort: 4060
+  - name: diameter
+    port: 3869
+    targetPort: 3869
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: scscf
+  namespace: ims
+spec:
+  selector:
+    io.kompose.service: scscf
+  ports:
+  - name: sip
+    port: 6060
+    targetPort: 6060
+  - name: diameter
+    port: 3870
+    targetPort: 3870
+---
+#hss-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hss
+  labels:
+    io.kompose.service: hss
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: hss
+  template:
+    metadata:
+      labels:
+        io.kompose.service: hss
+    spec:
+      containers:
+        - name: hss
+          image: default-route-openshift-image-registry.apps-crc.testing/ims/docker_open5gs:latest
+          command:
+            - /bin/bash
+            - -c
+            - |
+              echo "Starting HSS Open5GS with MongoDB and freeDiameter peers..."
+              mkdir -p /tmp/open5gs/logs
+              
+              # Update the MongoDB connection
+              sed -i 's|mongodb://localhost|mongodb://mongo|g' /open5gs/install/etc/open5gs/hss.yaml
+
+              # Modify hss.yaml metrics to listen on all interfaces
+              sed -i 's/address: 127.0.0.8/address: 0.0.0.0/' /open5gs/install/etc/open5gs/hss.yaml
+
+              # Update freeDiameter hss.conf to listen on all interfaces
+              sed -i 's|ListenOn = "127.0.0.8";|ListenOn = "0.0.0.0";|' /open5gs/install/etc/freeDiameter/hss.conf
+
+              # Comment out any existing peers to avoid duplicates
+              sed -i 's/ConnectPeer = "mme.localdomain"/#&/' /open5gs/install/etc/freeDiameter/hss.conf
+              sed -i 's/ConnectPeer = "scscf.localdomain"/#&/' /open5gs/install/etc/freeDiameter/hss.conf
+              sed -i 's/ConnectPeer = "icscf.localdomain"/#&/' /open5gs/install/etc/freeDiameter/hss.conf
+              sed -i 's/ConnectPeer = "pcscf.localdomain"/#&/' /open5gs/install/etc/freeDiameter/hss.conf
+
+              # Add clean Diameter peers configuration
+              echo "" >> /open5gs/install/etc/freeDiameter/hss.conf
+              echo "# IMS Diameter Peers Configuration" >> /open5gs/install/etc/freeDiameter/hss.conf
+              echo 'ConnectPeer = "scscf.localdomain" { ConnectTo = "scscf.ims.svc.cluster.local"; No_TLS; Port=6060; };' >> /open5gs/install/etc/freeDiameter/hss.conf
+              echo 'ConnectPeer = "icscf.localdomain" { ConnectTo = "icscf.ims.svc.cluster.local"; No_TLS; Port=3869; };' >> /open5gs/install/etc/freeDiameter/hss.conf
+              echo 'ConnectPeer = "pcscf.localdomain" { ConnectTo = "pcscf.ims.svc.cluster.local"; No_TLS; Port=3868; };' >> /open5gs/install/etc/freeDiameter/hss.conf
+
+              echo "=== HSS freeDiameter configuration updated ==="
+              echo "Configured peers:"
+              grep "ConnectPeer.*localdomain" /open5gs/install/etc/freeDiameter/hss.conf
+
+              # Validate configuration
+              echo "=== Validating HSS configuration ==="
+              if [ -f "/open5gs/install/etc/open5gs/hss.yaml" ]; then
+                echo "✓ HSS YAML configuration exists"
+              else
+                echo "✗ HSS YAML configuration missing"
+              fi
+              
+              if [ -f "/open5gs/install/etc/freeDiameter/hss.conf" ]; then
+                echo "✓ freeDiameter configuration exists"
+              else
+                echo "✗ freeDiameter configuration missing"
+              fi
+
+              echo "=== Starting HSS daemon ==="
+              # Start HSS with proper logging
+              exec /open5gs/install/bin/open5gs-hssd -c /open5gs/install/etc/open5gs/hss.yaml -l /tmp/open5gs/logs/hss.log
+          env:
+            - name: COMPONENT_NAME
+              value: hss
+          ports:
+            - containerPort: 3868
+              protocol: TCP
+              name: diameter
+            - containerPort: 9090
+              protocol: TCP
+              name: metrics
+          livenessProbe:
+            exec:
+              command:
+                - pgrep
+                - open5gs-hssd
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            tcpSocket:
+              port: 3868
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          volumeMounts:
+            - name: hss-logs
+              mountPath: /tmp/open5gs/logs
+      volumes:
+        - name: hss-logs
+          emptyDir: {}
+      restartPolicy: Always
+---
+#icscf-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: icscf
+  labels:
+    io.kompose.service: icscf
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: icscf
+  template:
+    metadata:
+      labels:
+        io.kompose.service: icscf
+    spec:
+      containers:
+        - name: icscf
+          image: default-route-openshift-image-registry.apps-crc.testing/ims/docker_kamailio:latest
+          command:
+            - /bin/bash
+            - -c
+            - |
+              echo "Starting ICSCF with complete Diameter configuration..."
+              
+              # Copy files
+              cp /etc/kamailio-config/* /usr/local/etc/kamailio/ 2>/dev/null || true
+              
+              # Get IPs
+              POD_IP=$(hostname -i)
+              MYSQL_SERVICE_IP="mysql.ims.svc.cluster.local"
+              HSS_SERVICE_IP="hss.ims.svc.cluster.local"
+              echo "Pod IP: $POD_IP"
+              
+              # Get HSS service IP and add to /etc/hosts (comme SCSCF)
+              echo "=== Resolving HSS Service IP ==="
+              HSS_IP=$(getent hosts hss.ims.svc.cluster.local | awk '{ print $1 }')
+              if [ -z "$HSS_IP" ]; then
+                echo "Waiting for HSS service..."
+                for i in {1..30}; do
+                  HSS_IP=$(getent hosts hss.ims.svc.cluster.local | awk '{ print $1 }')
+                  if [ -n "$HSS_IP" ]; then
+                    break
+                  fi
+                  sleep 2
+                done
+              fi
+              
+              echo "HSS Service IP: $HSS_IP"
+              
+              # Add HSS to /etc/hosts (comme SCSCF)
+              if [ -n "$HSS_IP" ]; then
+                sed -i '/hss.localdomain/d' /etc/hosts
+                echo "$HSS_IP hss.localdomain hss" >> /etc/hosts
+                echo "✓ Added hss.localdomain -> $HSS_IP to /etc/hosts"
+              fi
+              
+              # Wait for MySQL
+              echo "=== Waiting for MySQL ==="
+              for i in {1..20}; do
+                if timeout 5 bash -c '</dev/tcp/mysql.ims.svc.cluster.local/3306' 2>/dev/null; then
+                  echo "✓ MySQL is ready!"
+                  break
+                else
+                  echo "MySQL not ready, waiting... ($i/20)"
+                  sleep 3
+                fi
+              done
+              
+              # Wait for HSS Diameter port (comme SCSCF)
+              echo "Waiting for HSS Diameter port..."
+              for i in {1..20}; do
+                if timeout 5 bash -c '</dev/tcp/hss.ims.svc.cluster.local/3868' 2>/dev/null; then
+                  echo "✓ HSS Diameter port is ready!"
+                  break
+                fi
+                sleep 3
+              done
+              
+              # Create required directories for ICSCF
+              echo "=== Creating ICSCF directories ==="
+              mkdir -p /etc/kamailio_icscf
+              
+              # Create icscf.xml with proper Diameter configuration (comme SCSCF)
+              echo "=== Creating icscf.xml with Pod IP and HSS peer ==="
+              cat > /etc/kamailio_icscf/icscf.xml << XMLEOF
+              <?xml version="1.0" encoding="UTF-8"?>
+              <DiameterPeer
+                      FQDN="icscf.localdomain"
+                      Realm="localdomain"
+                      Vendor_Id="10415"
+                      Product_Name="CDiameterPeer"
+                      AcceptUnknownPeers="1"
+                      DropUnknownOnDisconnect="1"
+                      Tc="30"
+                      Workers="4"
+                      QueueLength="32"
+                      TransactionTimeout="10"
+                      SessionsHashSize="128"
+                      DefaultAuthSessionTimeout="3600"
+                      MaxAuthSessionTimeout="3600"
+              >
+                      <Peer FQDN="hss.localdomain" Realm="localdomain" port="3868"/>
+
+                      <Acceptor port="3869" bind="$POD_IP"/>
+                      <Acceptor port="3869" bind="0.0.0.0"/>
+
+                      <Auth id="16777216" vendor="10415"/>
+                      <Auth id="16777216" vendor="4491"/>
+                      <Auth id="16777216" vendor="13019"/>
+                      <Auth id="16777216" vendor="0"/>
+
+                      <Auth id="4" vendor="10415"/>
+                      <Acct id="4" vendor="10415"/>
+
+                      <SupportedVendor vendor="10415"/>
+
+                      <DefaultRoute FQDN="hss.localdomain" metric="10"/>
+              </DiameterPeer>
+              XMLEOF
+
+              echo "✓ icscf.xml created with POD_IP=$POD_IP on Diameter port 3869"
+              cat /etc/kamailio_icscf/icscf.xml | grep -E "bind|FQDN|Realm|Peer"
+              
+              # Create MySQL user for ICSCF
+              mysql -h mysql.ims.svc.cluster.local -u root -plinux -e "
+                CREATE USER IF NOT EXISTS 'icscf'@'%' IDENTIFIED BY 'heslo';
+                GRANT ALL PRIVILEGES ON icscf.* TO 'icscf'@'%';
+                CREATE DATABASE IF NOT EXISTS icscf;
+                FLUSH PRIVILEGES;
+              " 2>/dev/null || echo "MySQL user creation skipped (may already exist)"
+              
+              # Comprehensive variable replacement
+              echo "=== Comprehensive variable replacement ==="
+              find /usr/local/etc/kamailio -name "*.cfg" | while read file; do
+                echo "Processing variables in: $file"
+                sed -i "s/ICSCF_IP/$POD_IP/g" "$file"
+                sed -i "s/LISTEN_IP/$POD_IP/g" "$file"
+                sed -i "s/NETWORK_IP/$POD_IP/g" "$file"
+                sed -i "s/MYSQL_IP/$MYSQL_SERVICE_IP/g" "$file"
+                sed -i "s/HSS_IP/$HSS_SERVICE_IP/g" "$file"
+                sed -i 's/UE_SUBSCRIPTION_EXPIRES/3605/g' "$file"
+                sed -i 's/SUBSCRIPTION_EXPIRES_ENV/3605/g' "$file"
+                sed -i 's/TCP_PROCESSES/4/g' "$file"
+                sed -i 's/ICSCF_PROCESSES/4/g' "$file"
+                sed -i 's/SHM_MEM/64/g' "$file"
+                sed -i 's/PKG_MEM/8/g' "$file"
+                sed -i "s/listen=tcp:127.0.0.1:4060/listen=tcp:$POD_IP:4060/g" "$file"
+              done
+              
+              # CORRECTION GLOBALE : Équilibrer les directives dans TOUS les fichiers
+              echo "=== Global preprocessor directive balancing ==="
+              
+              total_ifdef=$(find /usr/local/etc/kamailio -name "*.cfg" -exec grep -h "^[[:space:]]*#!ifdef\|^[[:space:]]*#!ifndef" {} \; | wc -l)
+              total_endif=$(find /usr/local/etc/kamailio -name "*.cfg" -exec grep -h "^[[:space:]]*#!endif" {} \; | wc -l)
+              
+              echo "Global count - ifdef/ifndef: $total_ifdef, endif: $total_endif"
+              
+              if [ $total_ifdef -gt $total_endif ]; then
+                missing=$((total_ifdef - total_endif))
+                echo "⚠ Missing $missing #!endif directive(s) - Adding to main config"
+                
+                for i in $(seq 1 $missing); do
+                  echo "" >> /usr/local/etc/kamailio/kamailio_icscf.cfg
+                  echo "#!endif" >> /usr/local/etc/kamailio/kamailio_icscf.cfg
+                done
+              else
+                # FORCE: Même si équilibré, Kamailio compte mal à cause du contexte entre fichiers
+                echo "⚠ Counts balanced but forcing +1 #!endif for Kamailio parser context"
+                echo "" >> /usr/local/etc/kamailio/kamailio_icscf.cfg
+                echo "#!endif" >> /usr/local/etc/kamailio/kamailio_icscf.cfg
+              fi
+              
+              # Nettoyer tous les fichiers
+              echo "=== Cleaning all config files ==="
+              find /usr/local/etc/kamailio -name "*.cfg" | while read file; do
+                temp_file=$(mktemp)
+                sed 's/#!endif.*/#!endif/' "$file" | awk '{ print }' > "$temp_file"
+                echo "" >> "$temp_file"
+                echo "" >> "$temp_file"
+                mv "$temp_file" "$file"
+              done
+              
+              # Vérification finale
+              echo "=== Final global verification ==="
+              total_ifdef=$(find /usr/local/etc/kamailio -name "*.cfg" -exec grep -h "^[[:space:]]*#!ifdef\|^[[:space:]]*#!ifndef" {} \; | wc -l)
+              total_endif=$(find /usr/local/etc/kamailio -name "*.cfg" -exec grep -h "^[[:space:]]*#!endif" {} \; | wc -l)
+              echo "Final count - ifdef/ifndef: $total_ifdef, endif: $total_endif"
+              
+              # Verify Diameter connectivity (comme SCSCF)
+              echo "=== Verification DNS et Connectivité ==="
+              echo "DNS resolution test:"
+              getent hosts hss.localdomain
+              echo ""
+              echo "Connectivity test to HSS:"
+              timeout 3 bash -c '</dev/tcp/hss.localdomain/3868' && echo "✓ Can connect to HSS Diameter" || echo "✗ Cannot connect to HSS Diameter"
+              
+              # Set library path
+              export LD_LIBRARY_PATH="/usr/local/lib64:/usr/lib64:$LD_LIBRARY_PATH"
+              
+              echo "=== Testing Kamailio configuration ==="
+              if kamailio -c -f /usr/local/etc/kamailio/kamailio_icscf.cfg; then
+                echo "✓ Configuration syntax OK - Starting Kamailio ICSCF..."
+                exec kamailio -f /usr/local/etc/kamailio/kamailio_icscf.cfg -P /tmp/kamailio.pid -DD -E -e
+              else
+                echo "✗ Configuration error - per-file analysis:"
+                find /usr/local/etc/kamailio -name "*.cfg" -exec sh -c 'echo "=== {} ==="; grep -c "#!ifdef\|#!ifndef" {} | xargs echo "ifdef/ifndef:"; grep -c "#!endif" {} | xargs echo "endif:"' \;
+                kamailio -c -f /usr/local/etc/kamailio/kamailio_icscf.cfg 2>&1 | head -10
+                sleep infinity
+              fi
+          env:
+            - name: COMPONENT_NAME
+              value: icscf
+          volumeMounts:
+            - name: icscf-config
+              mountPath: /etc/kamailio-config
+          ports:
+            - containerPort: 5060
+              protocol: UDP
+            - containerPort: 5060
+              protocol: TCP
+            - containerPort: 4060
+              protocol: TCP
+            - containerPort: 4060
+              protocol: UDP
+            - containerPort: 3869
+              protocol: TCP
+              name: diameter
+          livenessProbe:
+            exec:
+              command:
+                - pgrep
+                - kamailio
+            initialDelaySeconds: 45
+            periodSeconds: 10
+          readinessProbe:
+            tcpSocket:
+              port: 3869
+            initialDelaySeconds: 20
+            periodSeconds: 5
+      volumes:
+        - name: icscf-config
+          configMap:
+            name: icscf-config
+      restartPolicy: Always
+---
+#pcrf-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pcrf
+  namespace: ims
+  labels:
+    io.kompose.service: pcrf
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: pcrf
+  template:
+    metadata:
+      labels:
+        io.kompose.service: pcrf
+    spec:
+      containers:
+        - name: pcrf
+          image: default-route-openshift-image-registry.apps-crc.testing/ims/docker_open5gs:latest
+          imagePullPolicy: Never
+          command:
+            - /bin/bash
+            - -c
+            - |
+              echo "Starting PCRF Open5GS with MongoDB..."
+              mkdir -p /tmp/open5gs/logs
+              
+              # Update the MongoDB connection
+              sed -i 's|mongodb://localhost|mongodb://mongo|g' /open5gs/install/etc/open5gs/pcrf.yaml
+
+              # Modify pcrf.yaml metrics to listen on all interfaces
+              sed -i 's/address: 127.0.0.9/address: 0.0.0.0/' /open5gs/install/etc/open5gs/pcrf.yaml
+
+              # Update freeDiameter pcrf.conf to listen on all interfaces
+              sed -i 's|ListenOn = "127.0.0.9";|ListenOn = "0.0.0.0";|' /open5gs/install/etc/freeDiameter/pcrf.conf
+
+              # Comment out any existing peers to avoid duplicates
+              sed -i 's/ConnectPeer = "pcscf.localdomain"/#&/' /open5gs/install/etc/freeDiameter/pcrf.conf
+              sed -i 's/ConnectPeer = "pgw.localdomain"/#&/' /open5gs/install/etc/freeDiameter/pcrf.conf
+              sed -i 's/ConnectPeer = "smf.localdomain"/#&/' /open5gs/install/etc/freeDiameter/pcrf.conf
+
+              # Réduire la verbosité freeDiameter
+              echo "=== Reducing freeDiameter log verbosity ==="
+              sed -i 's/FD_LOG_ERROR/FD_LOG_NOTICE/g' /open5gs/install/etc/freeDiameter/pcrf.conf
+              sed -i 's/FD_LOG_DEBUG/FD_LOG_NOTICE/g' /open5gs/install/etc/freeDiameter/pcrf.conf
+              
+              # Désactiver l'extension dbg_msg_dumps
+              sed -i 's/LoadExtension.*dbg_msg_dumps/#&/' /open5gs/install/etc/freeDiameter/pcrf.conf
+              sed -i 's/LoadExtension.*dbg_msg_dump/#&/' /open5gs/install/etc/freeDiameter/pcrf.conf
+
+              # IMPORTANT: Remove invalid parameters that cause crashes
+              echo "=== Cleaning freeDiameter configuration ==="
+              sed -i '/^TcTimeout/d' /open5gs/install/etc/freeDiameter/pcrf.conf
+              sed -i '/^TwTimeout/d' /open5gs/install/etc/freeDiameter/pcrf.conf
+              sed -i '/^NoRelay/d' /open5gs/install/etc/freeDiameter/pcrf.conf
+              sed -i '/^#NoRelay/d' /open5gs/install/etc/freeDiameter/pcrf.conf
+              
+              # Add NoRelay once in the correct location (after Identity)
+              sed -i '/^Identity/a NoRelay;' /open5gs/install/etc/freeDiameter/pcrf.conf
+              
+              # Réduire le nombre de workers
+              sed -i 's/Workers="[0-9]*"/Workers="2"/g' /open5gs/install/etc/freeDiameter/pcrf.conf
+
+              # Ajouter le peer PCSCF
+              echo "" >> /open5gs/install/etc/freeDiameter/pcrf.conf
+              echo "# PCRF Diameter Peers Configuration" >> /open5gs/install/etc/freeDiameter/pcrf.conf
+              echo 'ConnectPeer = "pcscf.localdomain" { ConnectTo = "pcscf.ims.svc.cluster.local"; No_TLS; Port=3868; };' >> /open5gs/install/etc/freeDiameter/pcrf.conf
+
+              echo "=== PCRF freeDiameter configuration updated ==="
+              echo "Configured peers:"
+              grep "ConnectPeer.*localdomain" /open5gs/install/etc/freeDiameter/pcrf.conf
+              
+              echo "NoRelay configuration:"
+              grep "NoRelay" /open5gs/install/etc/freeDiameter/pcrf.conf
+              
+              echo "Log verbosity: NOTICE level"
+
+              # Validate configuration
+              echo "=== Validating PCRF configuration ==="
+              if [ -f "/open5gs/install/etc/open5gs/pcrf.yaml" ]; then
+                echo "✓ PCRF YAML configuration exists"
+              else
+                echo "✗ PCRF YAML configuration missing"
+              fi
+              
+              if [ -f "/open5gs/install/etc/freeDiameter/pcrf.conf" ]; then
+                echo "✓ freeDiameter configuration exists"
+              else
+                echo "✗ freeDiameter configuration missing"
+              fi
+
+              echo "=== Starting PCRF daemon ==="
+              exec /open5gs/install/bin/open5gs-pcrfd -c /open5gs/install/etc/open5gs/pcrf.yaml -l /tmp/open5gs/logs/pcrf.log
+          env:
+            - name: COMPONENT_NAME
+              value: pcrf
+          ports:
+            - containerPort: 3868
+              protocol: TCP
+              name: diameter-rx
+            - containerPort: 9091
+              protocol: TCP
+              name: metrics
+          livenessProbe:
+            exec:
+              command:
+                - pgrep
+                - open5gs-pcrfd
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            tcpSocket:
+              port: 3868
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          volumeMounts:
+            - name: pcrf-config
+              mountPath: /etc/open5gs-config
+            - name: pcrf-logs
+              mountPath: /tmp/open5gs/logs
+      volumes:
+        - name: pcrf-config
+          configMap:
+            name: pcrf-config
+        - name: pcrf-logs
+          emptyDir: {}
+      restartPolicy: Always
+---
+#pcscf-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pcscf
+  labels:
+    io.kompose.service: pcscf
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: pcscf
+  template:
+    metadata:
+      labels:
+        io.kompose.service: pcscf
+    spec:
+      containers:
+        - name: pcscf
+          image: default-route-openshift-image-registry.apps-crc.testing/ims/docker_kamailio:latest
+          command:
+            - /bin/bash
+            - -c
+            - |
+              echo "Starting PCSCF with PCRF connection via Rx interface..."
+              
+              # Get PCRF service IP and add to /etc/hosts
+              echo "=== Resolving PCRF Service IP ==="
+              PCRF_IP=$(getent hosts pcrf.ims.svc.cluster.local | awk '{ print $1 }')
+              if [ -z "$PCRF_IP" ]; then
+                echo "Waiting for PCRF service..."
+                for i in {1..30}; do
+                  PCRF_IP=$(getent hosts pcrf.ims.svc.cluster.local | awk '{ print $1 }')
+                  if [ -n "$PCRF_IP" ]; then
+                    break
+                  fi
+                  sleep 2
+                done
+              fi
+              
+              echo "PCRF Service IP: $PCRF_IP"
+              
+              # Add PCRF to /etc/hosts
+              if [ -n "$PCRF_IP" ]; then
+                sed -i '/pcrf.localdomain/d' /etc/hosts
+                echo "$PCRF_IP pcrf.localdomain pcrf" >> /etc/hosts
+                echo "✓ Added pcrf.localdomain -> $PCRF_IP to /etc/hosts"
+              fi
+              
+              cp /etc/kamailio-config/* /usr/local/etc/kamailio/ 2>/dev/null || true
+              mkdir -p /usr/local/etc/kamailio/route
+              
+              POD_IP=$(hostname -i)
+              MYSQL_SERVICE_IP="mysql.ims.svc.cluster.local"
+              PCRF_SERVICE_IP="pcrf.ims.svc.cluster.local"
+              echo "Pod IP: $POD_IP"
+              
+              # Wait for PCRF Diameter port (Rx interface)
+              echo "Waiting for PCRF Diameter port (Rx interface - port 3868)..."
+              for i in {1..20}; do
+                if timeout 5 bash -c '</dev/tcp/pcrf.localdomain/3868' 2>/dev/null; then
+                  echo "✓ PCRF Diameter port is ready!"
+                  break
+                fi
+                sleep 3
+              done
+              
+              echo "=== Creating PCSCF directories ==="
+              mkdir -p /etc/kamailio_pcscf
+              
+              echo "=== Creating dispatcher.list for PCSCF ==="
+              cat > /etc/kamailio_pcscf/dispatcher.list << 'EOF'
+              # PCSCF Dispatcher List
+              1 sip:127.0.0.1:5060 0 0
+              EOF
+              echo "✓ dispatcher.list created"
+              
+              echo "=== Creating pcscf.xml with PCRF Rx interface (Application ID: 16777236) ==="
+              cat > /etc/kamailio_pcscf/pcscf.xml << EOF
+              <?xml version="1.0" encoding="UTF-8"?>
+              <DiameterPeer
+                      FQDN="pcscf.localdomain"
+                      Realm="localdomain"
+                      Vendor_Id="10415"
+                      Product_Name="CDiameterPeer"
+                      AcceptUnknownPeers="1"
+                      DropUnknownOnDisconnect="1"
+                      Tc="30"
+                      Workers="4"
+                      QueueLength="32"
+                      TransactionTimeout="10"
+                      SessionsHashSize="128"
+                      DefaultAuthSessionTimeout="3600"
+                      MaxAuthSessionTimeout="3600"
+              >
+                      <Peer FQDN="pcrf.localdomain" Realm="localdomain" port="3868"/>
+
+                      <Acceptor port="3868" bind="$POD_IP"/>
+                      <Acceptor port="3868" bind="0.0.0.0"/>
+
+                      <Auth id="16777236" vendor="10415"/>
+                      <Auth id="16777236" vendor="0"/>
+
+                      <SupportedVendor vendor="10415"/>
+
+                      <DefaultRoute FQDN="pcrf.localdomain" metric="10"/>
+              </DiameterPeer>
+              EOF
+              echo "✓ pcscf.xml created with PCRF Rx interface configuration"
+              
+              echo "=== Creating route files ==="
+              
+              cat > /usr/local/etc/kamailio/route/xmlrpc.cfg << 'EOF'
+              route[XMLRPC] {
+                  if ((method=="POST" || method=="GET") && uri=~"^/RPC") {
+                      set_reply_no_connect();
+                      dispatch_rpc();
+                      exit;
+                  }
+                  return;
+              }
+              EOF
+              
+              cat > /usr/local/etc/kamailio/route/websocket.cfg << 'EOF'
+              route[WEBSOCKET] {
+                  if (nat_uac_test(64)) {
+                      force_rport();
+                  }
+                  return;
+              }
+              EOF
+              
+              cat > /usr/local/etc/kamailio/route/register.cfg << 'EOF'
+              route[REGISTER] {
+                  if (!t_relay()) {
+                      sl_reply_error();
+                  }
+                  exit;
+              }
+              EOF
+              
+              cat > /usr/local/etc/kamailio/route/nat.cfg << 'EOF'
+              # NAT routes defined in main config
+              EOF
+              
+              cat > /usr/local/etc/kamailio/route/rtp.cfg << 'EOF'
+              # RTPEngine désactivé - routes vides
+              route[RTP] {
+                  xlog("L_INFO", "RTP route called but rtpengine is disabled\n");
+                  return;
+              }
+              route[RTPENGINE_OFFER] {
+                  xlog("L_INFO", "RTPENGINE_OFFER called but rtpengine is disabled\n");
+                  return;
+              }
+              route[RTPENGINE_ANSWER] {
+                  xlog("L_INFO", "RTPENGINE_ANSWER called but rtpengine is disabled\n");
+                  return;
+              }
+              route[RTPENGINE_MANAGE] {
+                  xlog("L_INFO", "RTPENGINE_MANAGE called but rtpengine is disabled\n");
+                  return;
+              }
+              route[ENC_RTP] {
+                  return;
+              }
+              route[ENC_SRTP] {
+                  return;
+              }
+              route[ENC_WS_RTP] {
+                  return;
+              }
+              route[ENC_WSS_RTP] {
+                  return;
+              }
+              EOF
+              
+              cat > /usr/local/etc/kamailio/route/mo.cfg << 'EOF'
+              route[MO] {
+                  record_route();
+                  if (!t_relay()) {
+                      sl_reply_error();
+                  }
+                  exit;
+              }
+              
+              route[MO_indialog] {
+                  if (has_totag()) {
+                      if (t_check_trans()) {
+                          t_relay();
+                          exit;
+                      }
+                  }
+                  record_route();
+                  if (!t_relay()) {
+                      sl_reply_error();
+                  }
+                  exit;
+              }
+              EOF
+              
+              cat > /usr/local/etc/kamailio/route/mt.cfg << 'EOF'
+              route[MT] {
+                  if (!t_relay()) {
+                      sl_reply_error();
+                  }
+                  exit;
+              }
+              
+              route[MT_indialog] {
+                  if (has_totag()) {
+                      if (t_check_trans()) {
+                          t_relay();
+                          exit;
+                      }
+                  }
+                  if (!t_relay()) {
+                      sl_reply_error();
+                  }
+                  exit;
+              }
+              EOF
+              
+              echo "✓ All route files created"
+              
+              echo "=== Injecting NAT routes directly into main config ==="
+              
+              sed -i '/^#!KAMAILIO/a \
+              \
+              # NAT module parameters\
+              modparam("nathelper", "received_avp", "$avp(received)")\
+              modparam("registrar", "received_avp", "$avp(received)")' /usr/local/etc/kamailio/kamailio_pcscf.cfg
+              
+              cat >> /usr/local/etc/kamailio/kamailio_pcscf.cfg << 'EOFNAT'
+
+              route[NATMANAGE] {
+                  if (is_request()) {
+                      if (has_totag()) {
+                          if (check_route_param("nat=yes")) {
+                              setbflag(6);
+                          }
+                      }
+                  }
+                  if (!(isflagset(5) || isbflagset(6))) {
+                      return;
+                  }
+                  if (is_request()) {
+                      if (!has_totag()) {
+                          if (t_is_branch_route()) {
+                              add_rr_param(";nat=yes");
+                          }
+                      }
+                  }
+                  if (is_reply()) {
+                      if (isbflagset(6)) {
+                          force_rport();
+                      }
+                  }
+                  return;
+              }
+
+              route[NATDETECT] {
+                  force_rport();
+                  if (nat_uac_test("19")) {
+                      if (!is_method("REGISTER")) {
+                          setflag(5);
+                      }
+                  }
+                  return;
+              }
+
+              route[DEC_RTP] {
+                  return;
+              }
+
+              route[DEC_SRTP] {
+                  return;
+              }
+
+              route[DEC_WS_RTP] {
+                  return;
+              }
+
+              route[DEC_WSS_RTP] {
+                  return;
+              }
+              EOFNAT
+              
+              echo "✓ NAT routes injected"
+              
+              echo "=== Variable replacement ==="
+              PCRF_IP="pcrf.ims.svc.cluster.local"
+              find /usr/local/etc/kamailio -name "*.cfg" -o -name "*.xml" | while read file; do
+                sed -i "s/PCSCF_IP/$POD_IP/g" "$file"
+                sed -i "s/LISTEN_IP/$POD_IP/g" "$file"
+                sed -i "s/NETWORK_IP/$POD_IP/g" "$file"
+                sed -i "s/MYSQL_IP/$MYSQL_SERVICE_IP/g" "$file"
+                sed -i "s/PCRF_IP/$PCRF_SERVICE_IP/g" "$file"
+                sed -i "s/IMS_DOMAIN/localdomain/g" "$file"
+                sed -i 's/UE_SUBSCRIPTION_EXPIRES/3605/g' "$file"
+                sed -i 's/SUBSCRIPTION_EXPIRES_ENV/3605/g' "$file"
+                sed -i 's/TCP_PROCESSES/4/g' "$file"
+                sed -i 's/PCSCF_PROCESSES/4/g' "$file"
+                sed -i 's/SHM_MEM/64/g' "$file"
+                sed -i 's/PKG_MEM/8/g' "$file"
+                sed -i 's/RTPENGINE_IP/127.0.0.1/g' "$file"
+              done
+              
+              echo "✓ Variables replaced"
+              
+              echo "=== Désactivation de RTPEngine ==="
+              find /usr/local/etc/kamailio -name "*.cfg" | while read file; do
+                sed -i 's/^[[:space:]]*loadmodule[[:space:]]*"rtpengine\.so"/#loadmodule "rtpengine.so" # DISABLED/g' "$file"
+                sed -i 's/^[[:space:]]*loadmodule[[:space:]]*"rtpengine"/#loadmodule "rtpengine" # DISABLED/g' "$file"
+              done
+              
+              find /usr/local/etc/kamailio -name "*.cfg" | while read file; do
+                sed -i 's/^[[:space:]]*modparam[[:space:]]*([[:space:]]*"rtpengine"/#modparam("rtpengine" # DISABLED/g' "$file"
+              done
+              
+              find /usr/local/etc/kamailio -name "*.cfg" | while read file; do
+                sed -i 's/rtpengine_manage()/# rtpengine_manage() # DISABLED/g' "$file"
+                sed -i 's/rtpengine_offer()/# rtpengine_offer() # DISABLED/g' "$file"
+                sed -i 's/rtpengine_answer()/# rtpengine_answer() # DISABLED/g' "$file"
+                sed -i 's/rtpengine_delete()/# rtpengine_delete() # DISABLED/g' "$file"
+              done
+              
+              echo "✓ RTPEngine disabled in all config files"
+              
+              echo "=== Verification ==="
+              echo "DNS resolution test:"
+              getent hosts pcrf.localdomain
+              echo ""
+              echo "Connectivity test:"
+              timeout 3 bash -c '</dev/tcp/pcrf.localdomain/3868' && echo "✓ Can connect to PCRF via Rx interface" || echo "✗ Cannot connect to PCRF"
+              echo ""
+              echo "Diameter Configuration (Rx interface to PCRF):"
+              cat /etc/kamailio_pcscf/pcscf.xml
+              
+              echo "=== Balancing preprocessor directives ==="
+              total_ifdef=$(find /usr/local/etc/kamailio -name "*.cfg" -exec grep -h "^[[:space:]]*#!ifdef\|^[[:space:]]*#!ifndef" {} \; | wc -l)
+              total_endif=$(find /usr/local/etc/kamailio -name "*.cfg" -exec grep -h "^[[:space:]]*#!endif" {} \; | wc -l)
+              echo "ifdef/ifndef: $total_ifdef, endif: $total_endif"
+              
+              if [ $total_ifdef -gt $total_endif ]; then
+                missing=$((total_ifdef - total_endif))
+                for i in $(seq 1 $missing); do
+                  echo "#!endif" >> /usr/local/etc/kamailio/kamailio_pcscf.cfg
+                done
+              else
+                echo "#!endif" >> /usr/local/etc/kamailio/kamailio_pcscf.cfg
+              fi
+              
+              find /usr/local/etc/kamailio -name "*.cfg" | while read file; do
+                temp_file=$(mktemp)
+                sed 's/#!endif.*/#!endif/' "$file" > "$temp_file"
+                echo "" >> "$temp_file"
+                mv "$temp_file" "$file"
+              done
+              
+              export LD_LIBRARY_PATH="/usr/local/lib64:/usr/lib64:$LD_LIBRARY_PATH"
+              
+              echo "=== Testing Kamailio configuration ==="
+              if kamailio -c -f /usr/local/etc/kamailio/kamailio_pcscf.cfg; then
+                echo "✓ Configuration OK - Starting Kamailio with PCRF Rx interface..."
+                exec kamailio -f /usr/local/etc/kamailio/kamailio_pcscf.cfg -P /tmp/kamailio.pid -DD -E -e
+              else
+                echo "✗ Configuration error:"
+                kamailio -c -f /usr/local/etc/kamailio/kamailio_pcscf.cfg 2>&1
+                sleep infinity
+              fi
+          env:
+            - name: COMPONENT_NAME
+              value: pcscf
+          volumeMounts:
+            - name: pcscf-config
+              mountPath: /etc/kamailio-config
+          ports:
+            - containerPort: 5060
+              protocol: UDP
+            - containerPort: 5060
+              protocol: TCP
+            - containerPort: 3868
+              protocol: TCP
+      volumes:
+        - name: pcscf-config
+          configMap:
+            name: pcscf-config
+      restartPolicy: Always
+---
+#scscf-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: scscf
+  labels:
+    io.kompose.service: scscf
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: scscf
+  template:
+    metadata:
+      labels:
+        io.kompose.service: scscf
+    spec:
+      containers:
+        - name: scscf
+          image: default-route-openshift-image-registry.apps-crc.testing/ims/docker_kamailio:latest
+          command:
+            - /bin/bash
+            - -c
+            - |
+              echo "Starting SCSCF with complete Diameter configuration..."
+              
+              # Get HSS service IP and add to /etc/hosts
+              echo "=== Resolving HSS Service IP ==="
+              HSS_IP=$(getent hosts hss.ims.svc.cluster.local | awk '{ print $1 }')
+              if [ -z "$HSS_IP" ]; then
+                echo "Waiting for HSS service..."
+                for i in {1..30}; do
+                  HSS_IP=$(getent hosts hss.ims.svc.cluster.local | awk '{ print $1 }')
+                  if [ -n "$HSS_IP" ]; then
+                    break
+                  fi
+                  sleep 2
+                done
+              fi
+              
+              echo "HSS Service IP: $HSS_IP"
+              
+              # Add HSS to /etc/hosts
+              if [ -n "$HSS_IP" ]; then
+                sed -i '/hss.localdomain/d' /etc/hosts
+                echo "$HSS_IP hss.localdomain hss" >> /etc/hosts
+                echo "✓ Added hss.localdomain -> $HSS_IP to /etc/hosts"
+              fi
+              
+              # Copy config files
+              cp /etc/kamailio-config/* /usr/local/etc/kamailio/ 2>/dev/null || true
+              
+              # Get IPs
+              POD_IP=$(hostname -i)
+              MYSQL_SERVICE_IP="mysql.ims.svc.cluster.local"
+              HSS_SERVICE_IP="hss.ims.svc.cluster.local"
+              ICSCF_SERVICE_IP="icscf.ims.svc.cluster.local"
+              echo "Pod IP: $POD_IP"
+              
+              # Wait for MySQL
+              echo "Waiting for MySQL..."
+              for i in {1..20}; do
+                if timeout 5 bash -c '</dev/tcp/mysql.ims.svc.cluster.local/3306' 2>/dev/null; then
+                  echo "✓ MySQL is ready!"
+                  break
+                fi
+                sleep 3
+              done
+
+              # Wait for HSS
+              echo "Waiting for HSS Diameter port..."
+              for i in {1..20}; do
+                if timeout 5 bash -c '</dev/tcp/hss.ims.svc.cluster.local/3868' 2>/dev/null; then
+                  echo "✓ HSS Diameter port is ready!"
+                  break
+                fi
+                sleep 3
+              done
+              
+              # Create directories
+              mkdir -p /etc/kamailio_scscf
+              mkdir -p /etc/kamailio_icscf  
+              mkdir -p /etc/kamailio_pcscf
+              
+              # Copy XSD files if they exist
+              echo "=== Copying XSD files ==="
+              if [ -f "/usr/local/etc/kamailio/CxDataType_Rel7.xsd" ]; then
+                cp /usr/local/etc/kamailio/*.xsd /etc/kamailio_scscf/ 2>/dev/null
+                echo "✓ XSD files copied from /usr/local/etc/kamailio"
+              elif [ -f "/etc/kamailio-config/CxDataType_Rel7.xsd" ]; then
+                cp /etc/kamailio-config/*.xsd /etc/kamailio_scscf/ 2>/dev/null
+                echo "✓ XSD files copied from /etc/kamailio-config"
+              else
+                echo "⚠ XSD files not found, creating minimal placeholder"
+                cat > /etc/kamailio_scscf/CxDataType_Rel7.xsd << 'XSDEOF'
+              <?xml version="1.0" encoding="UTF-8"?>
+              <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" 
+                         targetNamespace="http://www.3gpp.org/ftp/Specs/archive/29_series/29.229#CxDataType_Rel7"
+                         xmlns="http://www.3gpp.org/ftp/Specs/archive/29_series/29.229#CxDataType_Rel7"
+                         elementFormDefault="qualified">
+                  <xs:element name="IMSSubscription" type="xs:string"/>
+              </xs:schema>
+              XSDEOF
+                echo "✓ Placeholder XSD created"
+              fi
+              
+              # Create dispatcher.list
+              if [ -f "/usr/local/etc/kamailio/dispatcher.list" ]; then
+                cp /usr/local/etc/kamailio/dispatcher.list /etc/kamailio_scscf/
+              else
+                echo "# SCSCF Dispatcher List" > /etc/kamailio_scscf/dispatcher.list
+              fi
+              
+              # Create scscf.xml with proper configuration and local address
+              echo "=== Creating scscf.xml with Pod IP ==="
+              cat > /etc/kamailio_scscf/scscf.xml << XMLEOF
+              <?xml version="1.0" encoding="UTF-8"?>
+              <DiameterPeer
+                      FQDN="scscf.localdomain"
+                      Realm="localdomain"
+                      Vendor_Id="10415"
+                      Product_Name="CDiameterPeer"
+                      AcceptUnknownPeers="1"
+                      DropUnknownOnDisconnect="1"
+                      Tc="30"
+                      Workers="4"
+                      QueueLength="32"
+                      TransactionTimeout="10"
+                      SessionsHashSize="128"
+                      DefaultAuthSessionTimeout="3600"
+                      MaxAuthSessionTimeout="3600"
+              >
+                      <Peer FQDN="hss.localdomain" Realm="localdomain" port="3868"/>
+
+                      <Acceptor port="6060" bind="$POD_IP"/>
+                      <Acceptor port="6060" bind="0.0.0.0"/>
+
+                      <Auth id="16777216" vendor="10415"/>
+                      <Auth id="16777216" vendor="4491"/>
+                      <Auth id="16777216" vendor="13019"/>
+                      <Auth id="16777216" vendor="0"/>
+
+                      <Auth id="4" vendor="10415"/>
+                      <Acct id="4" vendor="10415"/>
+
+                      <SupportedVendor vendor="10415"/>
+
+                      <DefaultRoute FQDN="hss.localdomain" metric="10"/>
+              </DiameterPeer>
+              XMLEOF
+
+              echo "✓ scscf.xml created with POD_IP=$POD_IP"
+              cat /etc/kamailio_scscf/scscf.xml | grep -E "bind|FQDN|Realm"
+              
+              # Variable replacement
+              echo "=== Processing configuration files ==="
+              find /usr/local/etc/kamailio -type f | while read file; do
+                if [ -f "$file" ]; then
+                  sed -i "s/SCSCF_IP/$POD_IP/g" "$file"
+                  sed -i "s/LISTEN_IP/$POD_IP/g" "$file"
+                  sed -i "s/NETWORK_IP/$POD_IP/g" "$file"
+                  sed -i "s/MYSQL_IP/$MYSQL_SERVICE_IP/g" "$file"
+                  sed -i "s/HSS_IP/$HSS_SERVICE_IP/g" "$file"
+                  sed -i "s/ICSCF_IP/$ICSCF_SERVICE_IP/g" "$file"
+                  sed -i "s/IMS_DOMAIN/localdomain/g" "$file"
+                  sed -i 's/UE_SUBSCRIPTION_EXPIRES/3605/g' "$file"
+                  sed -i 's/SUBSCRIPTION_EXPIRES_ENV/3605/g' "$file"
+                  sed -i 's/TCP_PROCESSES/4/g' "$file"
+                  sed -i 's/SCSCF_PROCESSES/4/g' "$file"
+                  sed -i 's/SHM_MEM/64/g' "$file"
+                  sed -i 's/PKG_MEM/8/g' "$file"
+                  sed -i "s/listen=tcp:127.0.0.1:6060/listen=tcp:$POD_IP:6060/g" "$file"
+                  sed -i "s/listen=udp:.*:5060/listen=udp:$POD_IP:5060/g" "$file"
+                  sed -i "s/listen=tcp:.*:5060/listen=tcp:$POD_IP:5060/g" "$file"
+                fi
+              done
+              
+              # Fix preprocessor directives
+              find /usr/local/etc/kamailio -name "*.cfg" | while read file; do
+                temp_file=$(mktemp)
+                awk '
+                  /^[[:space:]]*#!endif/ { print "#!endif"; next }
+                  { print }
+                  END { print "" }
+                ' "$file" > "$temp_file"
+                mv "$temp_file" "$file"
+              done
+              
+              # Create MySQL user
+              mysql -h mysql.ims.svc.cluster.local -u root -plinux -e "
+                CREATE USER IF NOT EXISTS 'scscf'@'%' IDENTIFIED BY 'heslo';
+                GRANT ALL PRIVILEGES ON scscf.* TO 'scscf'@'%';
+                FLUSH PRIVILEGES;
+              " 2>/dev/null || true
+              
+              # Verify setup
+              echo "=== Verification ==="
+              echo "Files in /etc/kamailio_scscf:"
+              ls -la /etc/kamailio_scscf/
+              echo ""
+              echo "DNS resolution test:"
+              getent hosts hss.localdomain
+              echo ""
+              echo "Connectivity test:"
+              timeout 3 bash -c '</dev/tcp/hss.localdomain/3868' && echo "✓ Can connect to HSS" || echo "✗ Cannot connect to HSS"
+              
+              # Set library path
+              export LD_LIBRARY_PATH="/usr/local/lib64:/usr/lib64:$LD_LIBRARY_PATH"
+              
+              # Test configuration
+              echo "=== Testing Kamailio configuration ==="
+              if kamailio -c -f /usr/local/etc/kamailio/kamailio_scscf.cfg 2>&1 | tee /tmp/kamailio-test.log; then
+                echo "✓ Configuration OK"
+                echo "=== Starting Kamailio SCSCF ==="
+                exec kamailio -f /usr/local/etc/kamailio/kamailio_scscf.cfg -P /tmp/kamailio.pid -DD -E -e
+              else
+                echo "✗ Configuration error:"
+                cat /tmp/kamailio-test.log
+                sleep infinity
+              fi
+          env:
+            - name: COMPONENT_NAME
+              value: scscf
+          volumeMounts:
+            - name: scscf-config
+              mountPath: /etc/kamailio-config
+          ports:
+            - containerPort: 5060
+              protocol: UDP
+            - containerPort: 5060
+              protocol: TCP
+            - containerPort: 6060
+              protocol: UDP
+            - containerPort: 6060
+              protocol: TCP
+          livenessProbe:
+            exec:
+              command:
+                - pgrep
+                - kamailio
+            initialDelaySeconds: 45
+            periodSeconds: 10
+          readinessProbe:
+            tcpSocket:
+              port: 6060
+            initialDelaySeconds: 20
+            periodSeconds: 5
+      volumes:
+        - name: scscf-config
+          configMap:
+            name: scscf-config
+      restartPolicy: Always
