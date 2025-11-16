@@ -14,8 +14,12 @@ echo ""
 BASE_DIR="$HOME/docker_open5gs"
 
 echo -e "${YELLOW}Creating namespace 'ims'...${NC}"
-oc create namespace ims --dry-run=client -o yaml | oc apply -f -
-echo -e "${GREEN}✓ Namespace 'ims' ready${NC}"
+if oc get namespace ims &> /dev/null; then
+    echo -e "${GREEN}✓ Namespace 'ims' already exists${NC}"
+else
+    oc create namespace ims
+    echo -e "${GREEN}✓ Namespace 'ims' created${NC}"
+fi
 echo ""
 
 echo -e "${YELLOW}Creating SCSCF ConfigMap...${NC}"
