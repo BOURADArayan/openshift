@@ -85,6 +85,14 @@ fi
 
 echo ""
 
+# Silent cleanup of existing databases
+oc exec $mysql_pod -n ims -- sh -c 'export MYSQL_PWD=linux; mysql -u root -e "
+DROP DATABASE IF EXISTS pcscf;
+DROP DATABASE IF EXISTS scscf;
+DROP DATABASE IF EXISTS icscf;
+DROP DATABASE IF EXISTS kamailio;
+"' &>/dev/null
+
 echo -e "${YELLOW}=== PART 2: CREATING IMS DATABASES ===${NC}"
 
 oc exec $mysql_pod -n ims -- sh -c 'export MYSQL_PWD=linux; mysql -u root -e "
