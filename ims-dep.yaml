@@ -1,12 +1,4 @@
-#01-namespace.yaml
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: ims
-  labels:
-    name: ims
-    app: ims-core
----
+
 #02-pv-mongo.yaml
 apiVersion: v1
 kind: PersistentVolumeClaim
